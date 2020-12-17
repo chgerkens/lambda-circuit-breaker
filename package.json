@@ -1,0 +1,15 @@
+{
+    "name": "lambda-circuit-breaker",
+    "description": "Circuit breaker for AWS Lambda Functions with Event Source Mapping trigger (e.g. SQS)",
+    "version": "0.0.1",
+    "private": true,
+    "author": "Christoph Gerkens",
+    "license": "MIT",
+    "devDependencies": {
+        "aws-sdk": "^2.799.0",
+        "jest": "^24.7.1"
+    },
+    "scripts": {
+        "test": "jest"
+    }
+}

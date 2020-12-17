@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: circuitbreaker-example-sam
+
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Resources:
+  ExampleQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        maxReceiveCount: 6
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+
+  FaultyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: FaultyFunction
+      Description: A example Lambda function protected by a circuit breaker
+      Runtime: nodejs12.x
+      Handler: faulty-lambda.handler
+      MemorySize: 128
+      Timeout: 1
+      Environment:
+        Variables:
+          FAILURE_INJECTION_PARAM: !Ref FailureLambdaSsmParameter
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ExampleQueue.Arn
+            BatchSize: 1
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - SSMParameterReadPolicy:
+            ParameterName: !Ref FailureLambdaSsmParameter
+
+  FaultyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FaultyFunction}"
+      RetentionInDays: 30
+
+  # 'failure-lambda' configuration. Refer to https://github.com/gunnargrosch/failure-lambda
+  FailureLambdaSsmParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "FaultyLambdaFailureConfig"
+      Type: String
+      Value: '{"isEnabled": true, "failureMode": "latency", "rate": 1, "minLatency": 1000, "maxLatency": 4000, "exceptionMsg": "Exception message!", "statusCode": 404, "diskSpace": 100, "denylist": ["s3.*.amazonaws.com", "dynamodb.*.amazonaws.com"]}'
+
+  CircuitBreaker:
+    Type: AWS::Serverless::Application
+    Description: Circuit Breaker for FaultyFunction
+    Properties:
+      Location: ../../template.yml
+      Parameters:
+        TargetFunctionName: !Ref FaultyFunction
+        TargetQueueName: !GetAtt ExampleQueue.QueueName
+    DependsOn: FaultyLogGroup # Circuit Breaker's default cloudwatch alarm is based on log filter metrics

@@ -1,0 +1,278 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: lambda-circuit-breaker
+
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+  TargetFunctionName:
+    Description: Name of the lambda function for which a circuit breaker should be created.
+    Type: String
+  TargetQueueName:
+    Description: Name of the event source SQS queue
+    Type: String
+  ProvidedCloudwatchAlarmArn:
+    Description: (Optional) ARN of a existing cloudwatch alarm that should be used as a replacement for the default circuit breaker alarm.
+    Type: String
+    Default: ""
+  FailureLogFilterPattern:
+    Description: CloudWatch filter pattern that matches timeouts or errors. Depends on lambda runtime.
+    Type: String
+    # Attention: TAB whitespace between ERROR and Invoke
+    Default: '?"Task timed out" ?"ERROR	Invoke Error" ?"[ERROR]"'
+  PeriodBetweenTrialInvocationsInSeconds:
+    Type: Number
+    Default: 15
+  DefaultAlarmPeriodInSeconds:
+    Type: Number
+    Default: 10
+    AllowedValues:
+    - 10
+    - 30
+    - 60
+    - 300
+  DefaultAlarmEvaluationPeriods:
+    Type: Number
+    Default: 1
+  DefaultAlarmFailureSumThreshold:
+    Description: Must be high even that trial messages in half open state do not break threshold.
+    Type: Number
+    Default: 10
+  DefaultAlarmFailurePercentageThreshold:
+    Type: Number
+    Default: 50
+  LogRetentionInDays:
+    Description: How long CloudWatch logs if lambda functions should be kept.
+    Type: Number
+    Default: 30
+
+Conditions:
+  IncludeAlarm:
+    !Equals [!Ref ProvidedCloudwatchAlarmArn, ""]
+
+Resources:
+
+  InvocationsMetricFilter:
+    Condition: IncludeAlarm
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterPattern: 'END RequestId'
+      LogGroupName: !Sub "/aws/lambda/${TargetFunctionName}"
+      MetricTransformations:
+        - MetricName: Invocations
+          MetricValue: "1"
+          MetricNamespace: !Sub "Lambda-Circuit-Breaker-${TargetFunctionName}"
+
+  ErrorsMetricFilter:
+    Condition: IncludeAlarm
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterPattern: !Ref FailureLogFilterPattern
+      LogGroupName: !Sub "/aws/lambda/${TargetFunctionName}"
+      MetricTransformations:
+        - MetricName: Errors
+          MetricValue: "1"
+          MetricNamespace: !Sub "Lambda-Circuit-Breaker-${TargetFunctionName}"
+
+  CompositeFailureAlarm:
+    Condition: IncludeAlarm
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "CircuitBreaker-${TargetFunctionName}"
+      AlarmDescription: !Sub "Monitors error percentage and error sum of lambda function ${TargetFunctionName}"
+      AlarmRule: !Sub "ALARM(${FailurePercentageAlarm}) AND ALARM(${FailureSumAlarm})"
+
+  FailurePercentageAlarm:
+    Condition: IncludeAlarm
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "CircuitBreaker-${TargetFunctionName}-Pct"
+      Metrics:
+        - Expression: "100 * errors / invocations"
+          Id: "errorsPercentage"
+          Label: "errorsPercentage"
+          ReturnData: true
+        - Id: "errors"
+          MetricStat:
+            Metric:
+              MetricName: Errors
+              Namespace: !Sub "Lambda-Circuit-Breaker-${TargetFunctionName}"
+            Period: !Ref DefaultAlarmPeriodInSeconds
+            Stat: Sum
+          ReturnData: false
+        - Id: "invocations"
+          MetricStat:
+            Metric:
+              MetricName: Invocations
+              Namespace: !Sub "Lambda-Circuit-Breaker-${TargetFunctionName}"
+            Period: !Ref DefaultAlarmPeriodInSeconds
+            Stat: Sum
+          ReturnData: false
+      EvaluationPeriods: !Ref DefaultAlarmEvaluationPeriods
+      TreatMissingData: notBreaching
+      Threshold: !Ref DefaultAlarmFailurePercentageThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+  FailureSumAlarm:
+    Condition: IncludeAlarm
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "CircuitBreaker-${TargetFunctionName}-Sum"
+      MetricName: Errors
+      Namespace: !Sub "Lambda-Circuit-Breaker-${TargetFunctionName}"
+      Period: !Ref DefaultAlarmPeriodInSeconds
+      Statistic: Sum
+      EvaluationPeriods: !Ref DefaultAlarmEvaluationPeriods
+      TreatMissingData: notBreaching
+      Threshold: !Ref DefaultAlarmFailureSumThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+  ManageSQSEventSourceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs12.x
+      Handler: src/handlers/update-event-source-mapping.handler
+      Environment:
+        Variables:
+          FUNCTION_NAME: !Ref TargetFunctionName
+          QUEUE_ARN: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${TargetQueueName}"
+      Events:
+        OpenCircuitRule:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - "aws.cloudwatch"
+              detail-type:
+                - "CloudWatch Alarm State Change"
+              resources:
+                - !If [IncludeAlarm, !GetAtt CompositeFailureAlarm.Arn, !Ref ProvidedCloudwatchAlarmArn]
+              detail:
+                state:
+                  value:
+                    - "ALARM"
+            Input: '{ "enabled": false }'
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+          - Sid: ListEventSourceMappings
+            Effect: Allow
+            Action:
+              - lambda:listEventSourceMappings # Queue URL for Queue ARN
+            Resource: "*"
+          - Sid: UpdateEventSourceMappingOfTargetFunction
+            Effect: Allow
+            Action:
+              - lambda:UpdateEventSourceMapping # enable / disable
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*"
+
+  ManageSQSEventSourceFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ManageSQSEventSourceFunction}"
+      RetentionInDays: !Ref LogRetentionInDays
+
+  HalfOpenStepFunction:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "CircuitBreaker-${TargetFunctionName}"
+      Events:
+        HalfOpenRule:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - "aws.cloudwatch"
+              detail-type:
+                - "CloudWatch Alarm State Change"
+              resources:
+                - !If [IncludeAlarm, !GetAtt CompositeFailureAlarm.Arn, !Ref ProvidedCloudwatchAlarmArn]
+              detail:
+                previousState:
+                  value:
+                    - "ALARM"
+      Definition:
+        Comment: "Manages the half open state."
+        StartAt: Wait
+        States:
+          Trial:
+            Type: Task
+            Resource: !GetAtt SQSTrialPoller.Arn
+            ResultPath: $.trialResult
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: Close
+            Next: Choice
+          Choice:
+            Type: Choice
+            Choices:
+              - Variable: $.trialResult
+                StringEquals: passed
+                Next: Close
+              - Variable: $.trialResult
+                StringEquals: failed
+                Next: Wait
+              - Variable: $.trialResult
+                StringEquals: no-message-available
+                Next: Wait
+            Default: Close
+          Wait:
+            Type: Wait
+            Seconds: 15
+            Next: Trial
+          Close:
+            Type: Task
+            Resource: !GetAtt ManageSQSEventSourceFunction.Arn
+            Parameters:
+              enabled: true
+            End: true
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SQSTrialPoller
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ManageSQSEventSourceFunction
+
+  SQSTrialPoller:
+    Type: AWS::Serverless::Function
+    Properties:
+#      FunctionName: !Sub "SQSTrialPoller-${TargetFunctionName}"
+      Runtime: nodejs12.x
+      Handler: src/handlers/sqs-trial-poller.handler
+      MemorySize: 128
+      Timeout: 900 # max. function duration. Configure appropriate timeout on target function
+      Environment:
+        Variables:
+          QUEUE_NAME: !Ref TargetQueueName
+          FUNCTION_NAME: !Ref TargetFunctionName
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - LambdaInvokePolicy:
+            FunctionName: !Ref TargetFunctionName
+        - SQSPollerPolicy:
+            QueueName: !Ref TargetQueueName
+        - Statement:
+            - Sid: SQSGetTargetQueueUrl
+              Effect: Allow
+              Action:
+                - sqs:GetQueueUrl
+              Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${TargetQueueName}"
+
+  SQSTrialPollerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${SQSTrialPoller}"
+      RetentionInDays: !Ref LogRetentionInDays
+
+Outputs:
+  CompositeFailureAlarm:
+    Value: !GetAtt CompositeFailureAlarm.Arn
+    Condition: IncludeAlarm
+  FailurePercentageAlarm:
+    Value: !GetAtt FailurePercentageAlarm.Arn
+    Condition: IncludeAlarm
+  FailureSumAlarm:
+    Value: !GetAtt FailureSumAlarm.Arn
+    Condition: IncludeAlarm
+  HalfOpenStepFunction:
+    Value: !GetAtt HalfOpenStepFunction.Arn

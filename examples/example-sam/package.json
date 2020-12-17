@@ -1,0 +1,12 @@
+{
+    "name": "circuitbreaker-example-sam",
+    "description": "Example AWS Serverless Application (AWS SAM) that uses the circuit breaker",
+    "version": "0.1.0",
+    "private": true,
+    "dependencies": {
+        "failure-lambda": "^0.4.1"
+    },
+    "devDependencies": {
+        "aws-sdk": "^2.799.0"
+    }
+}

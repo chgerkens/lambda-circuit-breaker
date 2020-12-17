@@ -1,0 +1,6 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "circuitbreaker-example-sam"
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
