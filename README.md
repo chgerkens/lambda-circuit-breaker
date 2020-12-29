@@ -1,5 +1,5 @@
 # Circuit Breaker Solution for AWS Lambda
-An Circuit Breaker for AWS Lambda Functions that are triggered via Event Source Mappings (like Amazon SQS).
+A [Circuit Breaker for AWS Lambda Functions](https://medium.com/@ch.gerkens/circuit-breaker-solution-for-aws-lambda-functions-5264cb59031f) that are triggered via Event Source Mappings (like Amazon SQS).
 
 ![AWS Solution Architecture Diagram](lambda-circuit-breaker-simplified.png)
 
