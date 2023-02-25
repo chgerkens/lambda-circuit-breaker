@@ -4,6 +4,7 @@
     "version": "0.1.0",
     "private": true,
     "dependencies": {
+        "16": "0.0.2",
         "failure-lambda": "^0.4.1"
     },
     "devDependencies": {

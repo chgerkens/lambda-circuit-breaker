@@ -34,7 +34,7 @@ The first command will build the source of the application. The second command w
 
 Open the [**Applications**](https://console.aws.amazon.com/lambda/home#/applications) page of the Lambda console, and choose your application. When the deployment completes, view the application resources on the **Overview** tab.
 
-Send more then 10 SQS message within 10 seconds to the created queue  (via web console or AWS CLI) will active the circuit breaker.
+Send more then 10 SQS message within 10 seconds to the created queue  (via web console or AWS CLI) will activate the circuit breaker.
 
 ## Cleanup
 

@@ -127,15 +127,17 @@ Resources:
       Threshold: !Ref DefaultAlarmFailureSumThreshold
       ComparisonOperator: GreaterThanOrEqualToThreshold
 
-  ManageSQSEventSourceFunction:
-    Type: AWS::Serverless::Function
+  ManageSQSEventSourceMappingSF:
+    Type: AWS::Serverless::StateMachine
     Properties:
-      Runtime: nodejs12.x
-      Handler: src/handlers/update-event-source-mapping.handler
-      Environment:
-        Variables:
-          FUNCTION_NAME: !Ref TargetFunctionName
-          QUEUE_ARN: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${TargetQueueName}"
+      Name: !Sub "ManageSqsESM-${TargetFunctionName}"
+      Type: EXPRESS
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt ManageSQSEventSourceMappingSFLogGroup.Arn
       Events:
         OpenCircuitRule:
           Type: EventBridgeRule
@@ -146,30 +148,53 @@ Resources:
               detail-type:
                 - "CloudWatch Alarm State Change"
               resources:
-                - !If [IncludeAlarm, !GetAtt CompositeFailureAlarm.Arn, !Ref ProvidedCloudwatchAlarmArn]
+                - !If [ IncludeAlarm, !GetAtt CompositeFailureAlarm.Arn, !Ref ProvidedCloudwatchAlarmArn ]
               detail:
                 state:
                   value:
                     - "ALARM"
             Input: '{ "enabled": false }'
+      Definition:
+        Comment: Enable or disable the SQS event source mapping for a Lambda function
+        StartAt: ListEventSourceMappings
+        States:
+          ListEventSourceMappings:
+            Next: UpdateEventSourceMapping
+            Parameters:
+              EventSourceArn: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${TargetQueueName}"
+              FunctionName: !Ref TargetFunctionName
+            Resource: arn:aws:states:::aws-sdk:lambda:listEventSourceMappings
+            ResultPath: "$.listResponse"
+            Type: Task
+          UpdateEventSourceMapping:
+            End: true
+            Parameters:
+              Enabled.$: "$.enabled"
+              Uuid.$: "$.listResponse.EventSourceMappings[0].Uuid"
+            Resource: arn:aws:states:::aws-sdk:lambda:updateEventSourceMapping
+            Type: Task
       Policies:
-        - AWSLambdaBasicExecutionRole
         - Statement:
-          - Sid: ListEventSourceMappings
-            Effect: Allow
-            Action:
-              - lambda:listEventSourceMappings # Queue URL for Queue ARN
-            Resource: "*"
-          - Sid: UpdateEventSourceMappingOfTargetFunction
-            Effect: Allow
-            Action:
-              - lambda:UpdateEventSourceMapping # enable / disable
-            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*"
+            - Sid: ListEventSourceMappings
+              Effect: Allow
+              Action:
+                - lambda:listEventSourceMappings # Queue URL for Queue ARN
+              Resource: "*"
+            - Sid: UpdateEventSourceMappingOfTargetFunction
+              Effect: Allow
+              Action:
+                - lambda:UpdateEventSourceMapping # enable / disable
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*"
+            - Sid: Logging
+              Effect: Allow
+              Action: "logs:*"
+              Resource: "*"
+              # "!GetAtt ManageSQSEventSourceMappingSFLogGroup.Arn TODO
 
-  ManageSQSEventSourceFunctionLogGroup:
+  ManageSQSEventSourceMappingSFLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${ManageSQSEventSourceFunction}"
+      LogGroupName: !Sub "/aws/vendedlogs/states/ManageSqsESM-${TargetFunctionName}-logs"
       RetentionInDays: !Ref LogRetentionInDays
 
   HalfOpenStepFunction:
@@ -192,7 +217,7 @@ Resources:
                   value:
                     - "ALARM"
       Definition:
-        Comment: "Manages the half open state."
+        Comment: Manages the half open state.
         StartAt: Wait
         States:
           Trial:
@@ -223,21 +248,24 @@ Resources:
             Next: Trial
           Close:
             Type: Task
-            Resource: !GetAtt ManageSQSEventSourceFunction.Arn
+            Resource: arn:aws:states:::states:startExecution
             Parameters:
-              enabled: true
+              StateMachineArn: !Ref ManageSQSEventSourceMappingSF
+              Input:
+                enabled: true
+                AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID.$: "$$.Execution.Id"
             End: true
       Policies:
         - LambdaInvokePolicy:
             FunctionName: !Ref SQSTrialPoller
-        - LambdaInvokePolicy:
-            FunctionName: !Ref ManageSQSEventSourceFunction
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt ManageSQSEventSourceMappingSF.Name
 
   SQSTrialPoller:
     Type: AWS::Serverless::Function
     Properties:
 #      FunctionName: !Sub "SQSTrialPoller-${TargetFunctionName}"
-      Runtime: nodejs12.x
+      Runtime: nodejs16.x
       Handler: src/handlers/sqs-trial-poller.handler
       MemorySize: 128
       Timeout: 900 # max. function duration. Configure appropriate timeout on target function
